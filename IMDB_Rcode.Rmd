@@ -1,0 +1,903 @@
+---
+title: "Wicked 6: MGSC 661 Midterm Project"
+output: html_notebook
+---
+
+# Exploring the Dataset
+## 1. Setup
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(car)
+require(psych)
+library(ggplot2)
+library(splines)
+require(methods)
+library(gridExtra)
+library(reshape2)
+library(boot)
+require(lmtest)
+require(plm)
+library(stargazer)
+
+imdb = read.csv("IMDB_data_Fall_2024.csv")
+attach(imdb)
+
+numerical_col = imdb[, c(5,8,9,15,18,20,22,25,40)]  # movie_budget,release_year,duration,nb_news_articles,actor1_star_meter,actor2_star_meter,actor3_star_meter,nb_faces,movie_meter_IMDBpro
+categorical_col = imdb[, c(6,7,10,11,12,13,23)]  # release_day,release_month,language,country,maturity_rating,aspect_ratio,colour_film
+genre_col = imdb[, c(27:39)]
+```
+## 2. Identifying Outliers
+### Numerical Columns
+#### outlierTest
+```{r}
+for (col in colnames(numerical_col)) {
+  formula_numerical = as.formula(paste("imdb_score ~", col))
+  reg_numerical = lm(formula_numerical, data=imdb)
+  print(outlierTest(reg_numerical))
+}
+```
+#### qqPlot
+```{r}
+par(mfrow = c(3, 3)) 
+for (col in colnames(numerical_col)) {
+  formula_numerical = as.formula(paste("imdb_score ~", col))
+  reg_numerical = lm(formula_numerical, data=imdb)
+  qqPlot(reg_numerical, main=paste("qqplot of", col), envelope=list(style="none"))
+}
+```
+#### Linear regression
+```{r}
+mreg_formula = as.formula(paste("imdb_score ~", paste(names(numerical_col), collapse="+")))
+mreg_numerical = lm(mreg_formula, data=imdb)
+
+par(mfrow = c(1, 1)) 
+qqPlot(mreg_numerical, envelope=list(style="none"))
+
+outlierTest(mreg_numerical)
+```
+#### Conclusion: delete outliers (191,316,395,492,989,1581,1806)
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+imdb=imdb[-c(191,316,395,492,989,1581,1806),]
+attach(imdb)
+```
+### Categorical Columns
+#### Bar charts for categorical variables (not a lot of categories): release month, release day, country, language, maturity_rating, colour_film, genres
+```{r}
+# we decided to convert release_day to categorical variables 
+imdb$release_day <- factor(imdb$release_day)
+imdb$aespect_ratio <- factor(imdb$aspect_ratio)
+cag_cols <- imdb[c("release_month", "release_day",  "country", "language", "maturity_rating", "colour_film", "aspect_ratio")]
+
+#par(mfrow = c(3, 3), mar = c(5, 4, 4, 2) + 0.1)
+
+for (col_name in names(cag_cols)) {
+  counts <- table(cag_cols[[col_name]])
+  counts_sorted <- sort(counts, decreasing = TRUE)
+  
+  # Calculate y-axis limits
+  max_count <- max(counts_sorted)
+  ylim_values <- c(0, max_count * 1.1)  # Increase by 10% to accommodate labels
+  
+  bar_positions <- barplot(counts_sorted, main = paste("Barplot of", col_name),
+                           ylab = "Count", xlab = col_name, xaxt = "n",
+                           ylim = ylim_values)  # Set y-axis limits
+  
+  # Add x-axis labels manually with a 45-degree tilt
+  text(x = bar_positions, 
+       y = par("usr")[3] - 3,  # Adjusted position below the x-axis
+       labels = names(counts_sorted), 
+       srt = 45,                  # Tilt labels 45 degrees
+       adj = 1,                   # Adjust label position
+       xpd = TRUE,                # Allow labels outside plot region
+       cex = 0.8)                 # Adjust label size
+  
+  # Add counts on top of bars
+  text(x = bar_positions, 
+       y = counts_sorted, 
+       labels = counts_sorted, 
+       pos = 3,           # Position above the bars
+       cex = 0.8)
+}
+
+
+genres <- subset(imdb,  select = c(action, adventure, scifi, thriller, musical, romance, western, sport, horror, drama, war, animation, crime))
+genre_totals <- colSums(genres)
+genre_totals <- sort(genre_totals, decreasing = TRUE) # Sorting the totals in descending order
+
+# Calculate y-axis limits
+max_count <- max(genre_totals)
+ylim_values <- c(0, max_count * 1.1)  # Increase by 10% to accommodate labels
+
+# Creating the bar plot with adjusted y-axis limits
+bar_positions <- barplot(genre_totals,
+            main = "Barplot of genres",
+            xlab = "Genre",
+            ylab = "Total Count",
+            xaxt = "n",
+            ylim = ylim_values)  # Set y-axis limits
+
+# Add x-axis labels manually with a 45-degree tilt
+text(x = bar_positions, 
+     y = par("usr")[3] - 30,  # Position slightly below the x-axis
+     labels = names(genre_totals), 
+     srt = 45,               # Tilt labels 45 degrees
+     adj = 1,                # Adjust label position
+     xpd = TRUE,             # Allow labels outside plot region
+     cex = 1)                # Adjust label size
+
+# Add counts on top of bars
+text(x = bar_positions, 
+     y = genre_totals, 
+     labels = genre_totals, 
+     pos = 3,                # Position above the bars
+     cex = 0.8)
+
+#par(mfrow = c(1, 1))
+```
+
+#### Bar chart for categorical variables (with a lot of categories): director, distributer, actor1-3, cinematographer, production_company, plot_keywords (only displaying top 30 categories)
+```{r}
+plot_top_categories <- function(data_vector, top_n = 30, main_title = "") {
+  counts <- table(data_vector)
+  counts_sorted <- sort(counts, decreasing = TRUE)
+  top_counts <- head(counts_sorted, top_n)
+  
+  max_count <- max(top_counts)
+  
+  bar_positions <- barplot(top_counts, 
+                           main = main_title, 
+                           ylab = "Count", 
+                           xlab = "", 
+                           ylim = c(0, max_count * 1.1),  # Add extra space for labels
+                           xaxt = "n")  # Suppress default x-axis labels
+  
+  text(x = bar_positions, 
+       y = par("usr")[3] - max_count * 0.05,  # Position slightly below the x-axis
+       labels = names(top_counts), 
+       srt = 45,               # Tilt labels 45 degrees
+       adj = 1,                # Adjust label position
+       xpd = TRUE,             # Allow labels outside plot region
+       cex = 0.8)              # Adjust label size
+  
+  text(x = bar_positions, 
+       y = top_counts, 
+       labels = top_counts, 
+       pos = 3,               # Position above the bars
+       cex = 0.8,
+       xpd = TRUE)
+}
+
+columns_to_plot <- c("director", "distributor","cinematographer", "production_company", "plot_keywords")
+
+for (col in columns_to_plot) {
+  if (col == "plot_keywords") {
+    plot_keywords <- imdb$plot_keywords
+    plot_keywords_split <- unlist(strsplit(as.character(plot_keywords), "\\|"))
+    plot_top_categories(plot_keywords_split, top_n = 30, 
+                        main_title = "Top 30 Categories of plot_keywords")
+  } else {
+    data_vector <- imdb[[col]]
+    plot_top_categories(data_vector, top_n = 30, 
+                        main_title = paste("Top 30 Categories of", col))
+  }
+}
+```
+
+#### Function to detect outliers
+```{r}
+detect_rare_categories <- function(data, column_name, threshold = 0.05) {
+  # Calculate frequency of each category
+  category_freq <- table(data[[column_name]]) / nrow(data)
+  
+  # Identify rare categories (below threshold)
+  rare_categories <- names(category_freq[category_freq < threshold])
+  
+  # Return the rare categories and their frequencies
+  return(list(rare_categories = rare_categories, frequencies = category_freq[rare_categories]))
+}
+
+detect_rare_dummy_variables <- function(data, column_name, threshold = 0.05) {
+  # Calculate proportion of 1s (true/presence) in the dummy variable column
+  proportion_true <- sum(data[[column_name]] == 1, na.rm = TRUE) / nrow(data)
+  
+  # Print the proportion for debugging
+  #print(paste("Proportion of 1s for", column_name, ":", proportion_true))
+  
+  # Check if the proportion is below the threshold (considered rare if less than threshold)
+  if (proportion_true < threshold) {
+    return(list(column_name = column_name, proportion_true = proportion_true))
+  } else {
+    return(NULL)  # Return NULL if the proportion is not below the threshold
+  }
+}
+```
+#### Outliers for 'language'
+```{r}
+rare_language <- detect_rare_categories(imdb, "language", threshold = 0.05)
+print(rare_language)
+```
+#### Outliers for 'country'
+```{r}
+rare_country <- detect_rare_categories(imdb, "country", threshold = 0.05)
+print(rare_country)
+```
+#### Outliers for genres
+```{r}
+# Initialize a list to store results
+rare_genres <- list()
+
+# Iterate over the dummy columns and apply the function
+for (col_name in colnames(genre_col)) {
+  rare_genre <- detect_rare_dummy_variables(imdb, col_name, threshold = 0.05)
+  
+  if (!is.null(rare_genre)) {
+    rare_genres[[col_name]] <- rare_genre
+  }
+}
+
+# Display the rare genres (dummy variables) and their proportions
+print(rare_genres)
+```
+## 3. Distributions of the variables
+### Boxplots for numerical columns
+```{r}
+par(mfrow = c(1, 2)) 
+for (col in colnames(numerical_col)) {
+  boxplot(imdb[[col]], main=paste("Boxplot of", col), ylab=col)
+}
+```
+### Histograms for numerical columns
+```{r}
+par(mfrow = c(3, 3)) 
+for (col in colnames(numerical_col)) {
+  hist(imdb[[col]], main=paste("Histogram of", col), ylab="Count", xlab=col)
+}
+```
+### Bar charts for categorical columns
+```{r}
+par(mfrow = c(2, 2)) 
+for (col in colnames(categorical_col)) {
+  counts <- table(imdb[[col]])   # Use table() to get frequency counts of each category
+  counts_sorted <- sort(counts, decreasing = TRUE)
+  bar_positions <- barplot(counts_sorted, main=paste("Barplot of", col), ylab="Count", xlab=col, xaxt = "n")
+  
+  # Add x-axis labels manually with a 45-degree tilt
+  text(x = bar_positions, 
+       y = par("usr")[3] -15,  # Position slightly below the x-axis
+       labels = names(counts_sorted), 
+       srt = 45,               # Tilt labels 45 degrees
+       adj = 1,                # Adjust label position
+       xpd = TRUE,             # Allow labels outside plot region
+       cex = 1)              # Adjust label size
+}
+```
+## 4. Detect for collinearity
+### Correlation matrix
+```{r}
+pairs.panels(numerical_col)
+corr_matrix=cor(numerical_col)
+round(corr_matrix, 2)
+```
+### vif
+```{r}
+vif(mreg_numerical)
+```
+##### Conclusion: No collinearity issue among numerical columns
+
+## 5. Detect heteroskedasticity
+### Scatter plot
+```{r}
+par(mfrow = c(2, 2)) 
+for (col in colnames(numerical_col)) {
+  plot(imdb[[col]], main=paste("scatter plot of", col), imdb_score, xlab=col)
+}
+```
+### Non-constant variance (NCV) test
+```{r}
+formula = as.formula(paste("imdb_score ~", paste(names(numerical_col), collapse="+")))
+mreg_numerical = lm(formula, data=imdb)
+ncvTest(mreg_numerical)
+summary(mreg_numerical)
+```
+#### Conclusion: some columns has heteroskedasticity
+
+## 6. Test linearity for predictors
+### All predictors
+```{r}
+fit_all <- lm(imdb_score ~ movie_budget + duration + release_month + release_year + language + maturity_rating + aspect_ratio + nb_news_articles + colour_film + action + adventure + scifi + thriller + musical + romance + western + sport + horror + drama + war + animation + crime + actor1_star_meter + actor2_star_meter + actor3_star_meter + nb_faces + movie_meter_IMDBpro)
+summary(fit_all)
+residualPlots(fit_all)
+```
+### Test for all numeric predictors
+```{r}
+fit_all_numeric <- lm(imdb_score ~ movie_budget + duration + release_year + nb_news_articles + 
+                        actor1_star_meter + actor2_star_meter + actor3_star_meter + nb_faces + movie_meter_IMDBpro)
+summary(fit_all_numeric)
+residualPlots(fit_all_numeric)
+```
+### Remove duration, release_year, nb_faces, movie_meter_IMDBpro (results in a linear model, with p = 0.9)
+```{r}
+fit_numeric_2 <- lm(imdb_score ~ movie_budget + actor1_star_meter + actor2_star_meter + actor3_star_meter)
+summary(fit_numeric_2)
+residualPlots(fit_numeric_2)
+```
+
+## 7. Correcting issues
+### Correcting heteroskedasticity
+```{r}
+coeftest(mreg_numerical, vcov=vcovHC(mreg_numerical, type="HC1"))
+```
+#### Heteroskedasticity made estimates look more significant than they really are. "movie_meter_IMDBpro" is not significant after correcting heteroskedaticity.
+
+### Correcting skewness - log transform
+```{r}
+# List of columns to log transform
+skewed_columns <- c("movie_budget", "duration", "nb_news_articles",
+                    "actor1_star_meter", "actor2_star_meter", "actor3_star_meter",
+                    "nb_faces", "movie_meter_IMDBpro")
+
+# Apply log transformation (adding 1 to avoid log(0))
+for (col in skewed_columns) {
+  imdb[[paste0("log_", col)]] = log(imdb[[col]] + 1)
+}
+head(imdb[, paste0("log_", skewed_columns)])
+```
+#### Plot histograms for log-transformed variables
+```{r}
+par(mfrow = c(3, 3)) 
+for (col in paste0("log_", skewed_columns)) {
+  hist(imdb[[col]], main = paste("Histogram of", col), 
+       xlab = col, breaks = 10)
+}
+```
+#### Linearity after log transform
+```{r}
+maareg2=lm(imdb_score ~ log_movie_budget + log_duration + 
+             log_nb_news_articles + log_actor1_star_meter + log_actor2_star_meter + 
+             log_actor3_star_meter + log_nb_faces + log_movie_meter_IMDBpro, data = imdb)
+residualPlots(maareg2)
+```
+#### movie_budget, duration, actor3_star_meter become linear after log transform.
+#### duration, nb_news_articles, actor1_star_meter, actor2_star_meter, actor3_star_meter, movie_meter_IMDBpro are not skewed after log transform.
+
+## 7. Simple linear regressions between Y and each predictor x
+### Correlation coefficient between Y and each predictor
+```{r}
+for (predictor in colnames(numerical_col)) {
+  corr_coef = cor(imdb[[predictor]], imdb_score, use="complete.obs")
+  print(paste("Corr imdb_score,", predictor, ":", round(corr_coef, 2)))
+}
+```
+### Simple linear regressions: numerical predictors
+```{r}
+for (col in colnames(numerical_col)) {
+  formula_numerical = as.formula(paste("imdb_score ~", col))
+  reg_numerical = lm(formula_numerical, data=imdb)
+  print(summary(reg_numerical))
+}
+```
+### Simple linear regressions: categorical predictors
+```{r}
+for (col in colnames(categorical_col)) {
+  imdb[[col]] = as.factor(imdb[[col]])
+  formula_categorical = as.formula(paste("imdb_score ~", col))
+  reg_categorical = lm(formula_categorical, data=imdb)
+  print(summary(reg_categorical))
+}
+```
+### Simple linear regressions: genre
+```{r}
+formula_genre = as.formula(paste("imdb_score ~", paste(names(genre_col), collapse="+")))
+reg_genre = lm(formula_genre, data=imdb)
+print(summary(reg_genre))
+```
+## 9. Polynomial Test
+### ANOVA tests for each numeric predictor
+```{r}
+for (predictor in colnames(numerical_col)) {
+  formula_ln <- as.formula(paste('imdb_score ~', predictor))
+  formula_p2 <- as.formula(paste('imdb_score ~ poly(', predictor, ', 2)'))
+  formula_p3 <- as.formula(paste('imdb_score ~ poly(', predictor, ', 3)'))
+  formula_p4 <- as.formula(paste('imdb_score ~ poly(', predictor, ', 4)'))
+  formula_p5 <- as.formula(paste('imdb_score ~ poly(', predictor, ', 5)'))
+  
+  model_ln <- lm(formula_ln)
+  model_p2 <- lm(formula_p2)
+  model_p3 <- lm(formula_p3)
+  model_p4 <- lm(formula_p4)
+  model_p5 <- lm(formula_p5)
+  
+  cat("\nANOVA results for variable:", predictor, "\n")
+  print(anova(model_ln, model_p2, model_p3, model_p4, model_p5))
+}
+```
+### Perform ANOVA Test again to evaluate variables with more than 1 polynomial degrees as best options
+#### duration
+```{r}
+duration_p2 <- lm(imdb_score ~ poly(duration, 2))
+duration_p5 <- lm(imdb_score ~ poly(duration, 5))
+anova(duration_p2,duration_p5)
+```
+#### release_day 
+```{r}
+release_day_ln <- lm(imdb_score ~ release_day)
+release_day_p5 <- lm(imdb_score ~ poly(release_day, 5))
+anova(release_day_ln, release_day_p5)
+```
+#### actor2_star_meter
+```{r}
+actor2_star_meter_ln <- lm(imdb_score ~ actor2_star_meter)
+actor2_star_meter_p5 <- lm(imdb_score ~ poly(actor2_star_meter, 5))
+anova(actor2_star_meter_ln, actor2_star_meter_p5)
+```
+#### actor3_star_meter
+```{r}
+actor3_star_meter_ln <- lm(imdb_score ~ actor3_star_meter)
+actor3_star_meter_p2 <- lm(imdb_score ~ poly(actor3_star_meter, 2))
+actor3_star_meter_p4 <- lm(imdb_score ~ poly(actor3_star_meter, 4))
+anova(actor3_star_meter_ln,actor3_star_meter_p2, actor3_star_meter_p4)
+```
+### Compare out of sample performance for all numeric predictors with K fold (K = 10) 
+### Compare the result from this code with the ANOVA tests to determine the final polynomial degree 
+### The code below will perform a k-fold tests and print out the three lowest MSE and the corresponding polynomial degree
+
+#### nb_news_articles
+```{r}
+nb_news_articles_error = rep(NA,8)
+
+for (i in 1:8){
+  if (i == 1) {
+    fit_nb_news_articles = glm(imdb_score ~ nb_news_articles, data = imdb)
+  }
+  else {
+    fit_nb_news_articles = glm(imdb_score ~ poly(nb_news_articles,i), data = imdb)
+  }
+  nb_news_articles_error[i] = cv.glm(imdb, fit_nb_news_articles, K = 10)$delta[1]
+}
+
+mse_results_nb_news_articles <- data.frame(
+  Degree = 1:8,
+  MSE = nb_news_articles_error
+)
+
+mse_results_nb_news_articles <- mse_results_nb_news_articles[order(mse_results_nb_news_articles$MSE), ]
+
+print(head(mse_results_nb_news_articles, 3))
+```
+#### actor1_star_meter
+```{r}
+actor1_star_meter_error = rep(NA,8)
+
+for (i in 1:8){
+  if (i == 1) {
+    fit_actor1_star_meter = glm(imdb_score ~ actor1_star_meter, data = imdb)
+  }
+  else {
+    fit_actor1_star_meter = glm(imdb_score ~ poly(actor1_star_meter,i), data = imdb)
+  }
+  actor1_star_meter_error[i] = cv.glm(imdb, fit_actor1_star_meter, K = 10)$delta[1]
+}
+
+mse_results_actor1_star_meter <- data.frame(
+  Degree = 1:8,
+  MSE = actor1_star_meter_error
+)
+
+mse_results_actor1_star_meter <- mse_results_actor1_star_meter[order(mse_results_actor1_star_meter$MSE), ]
+
+print(head(mse_results_actor1_star_meter, 3))
+```
+#### actor2_star_meter
+```{r}
+actor2_star_meter_error = rep(NA,7)
+
+for (i in 1:7){
+  if (i == 1) {
+    fit_actor2_star_meter = glm(imdb_score ~ actor2_star_meter, data = imdb)
+  }
+  else {
+    fit_actor2_star_meter = glm(imdb_score ~ poly(actor2_star_meter,i), data = imdb)
+  }
+  actor2_star_meter_error[i] = cv.glm(imdb, fit_actor2_star_meter, K = 10)$delta[1]
+}
+
+mse_results_actor2_star_meter <- data.frame(
+  Degree = 1:7,
+  MSE = actor2_star_meter_error
+)
+
+mse_results_actor2_star_meter <- mse_results_actor2_star_meter[order(mse_results_actor2_star_meter$MSE), ]
+
+print(head(mse_results_actor2_star_meter, 3))
+```
+#### actor3_star_meter
+```{r}
+actor3_star_meter_error = rep(NA,8)
+
+for (i in 1:8){
+  if (i == 1) {
+    fit_actor3_star_meter = glm(imdb_score ~ actor3_star_meter, data = imdb)
+  }
+  else {
+    fit_actor3_star_meter = glm(imdb_score ~ poly(actor3_star_meter,i), data = imdb)
+  }
+  actor3_star_meter_error[i] = cv.glm(imdb, fit_actor3_star_meter, K = 10)$delta[1]
+}
+
+mse_results_actor3_star_meter <- data.frame(
+  Degree = 1:8,
+  MSE = actor3_star_meter_error
+)
+
+mse_results_actor3_star_meter <- mse_results_actor3_star_meter[order(mse_results_actor3_star_meter$MSE), ]
+
+print(head(mse_results_actor3_star_meter, 3))
+```
+#### For all other predictors 
+```{r}
+predictors_mse_k10 <- c(
+  "movie_budget", "duration", "release_day", "release_year", 
+  "nb_faces", "movie_meter_IMDBpro"
+)
+
+all_mse_results <- list()
+
+# Loop through each predictor
+for (predictor in predictors_mse_k10) {
+  predictor_error <- rep(NA, 10)
+  
+  # Loop through polynomial degrees 1 to 10
+  for (i in 1:10) {
+    # Fit the model based on the degree
+    if (i == 1) {
+      fit_predictor <- glm(as.formula(paste("imdb_score ~", predictor)), data = imdb)
+    } else {
+      fit_predictor <- glm(as.formula(paste("imdb_score ~ poly(", predictor, ",", i, ")")), data = imdb)
+    }
+    
+    # Perform 10-fold cross-validation and store the MSE
+    predictor_error[i] <- cv.glm(imdb, fit_predictor, K = 10)$delta[1]
+  }
+  
+  # Create a data frame to store degrees and their corresponding MSE
+  mse_results <- data.frame(
+    Degree = 1:10,
+    MSE = predictor_error
+  )
+  
+  # Sort the results by MSE in ascending order
+  mse_results <- mse_results[order(mse_results$MSE), ]
+  
+  all_mse_results[[predictor]] <- mse_results
+  
+  # Print the 3 lowest MSE values and their corresponding polynomial degrees for the predictor
+  cat("\nTop 3 MSE values for predictor:", predictor, "\n")
+  print(head(mse_results, 3))
+}
+```
+## 10. Splines
+### All numeric predictors, d = 1
+### Apply splines with the number of knots varying from 1 to 5 knots 
+### Polynomial degree = 1
+### Compare the result MSE with the MSE from ANOVA test above - to see if slines are needed for each variable 
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+spline_results <- list()
+
+plot_spline_fit <- function(data, predictor, best_k, best_knots, best_spline_formula) {
+  # Create the best spline model
+  best_fit_spline <- lm(best_spline_formula, data = imdb)
+  
+  # Plot the spline fit along with the data
+  plot <- ggplot(imdb, aes_string(x = predictor, y = "imdb_score")) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm", formula = best_spline_formula, color = "blue") +
+    geom_smooth(method = "loess", color = "red", linetype = "dashed") +
+    geom_vline(xintercept = best_knots, linetype = "dotted", color = "black") +
+    ggtitle(paste("Best Spline Fit for", predictor, "with", best_k, "knots")) +
+    xlab(predictor) +
+    ylab("IMDB Score") +
+    theme_minimal()
+  
+  # Print the plot
+  print(plot)
+}
+
+# Loop through each predictor
+for (predictor in colnames(numerical_col)) {
+  
+  max_knots <- 5  
+  mse_splines <- rep(NA, max_knots)
+  
+  # Loop through different numbers of knots
+  for (k in 1:max_knots) {
+    # Create knots at equally spaced percentiles of the predictor
+    knots <- quantile(imdb[[predictor]], probs = seq(0, 1, length.out = k + 2)[-c(1, k + 2)])
+    
+    spline_formula <- as.formula(paste("imdb_score ~ bs(", predictor, ", knots = c(", paste(knots, collapse = ", "), "))"))
+    fit_spline <- glm(spline_formula, data = imdb)
+    mse_splines[k] <- cv.glm(imdb, fit_spline, K = 10)$delta[1]
+  }
+  
+  # Create a data frame to store number of knots and their corresponding MSE
+  mse_results <- data.frame(
+    Knots = 1:max_knots,
+    MSE = mse_splines
+  )
+  
+  mse_results <- mse_results[order(mse_results$MSE), ]
+  spline_results[[predictor]] <- mse_results
+  
+  cat("\nMSE values for spline models with varying knots for:", predictor, "\n")
+  print(mse_results)
+  
+  # Get the best number of knots for plotting
+  best_k <- mse_results$Knots[1]
+  best_percentiles <- seq(0, 1, length.out = best_k + 2)[-c(1, best_k + 2)]
+  best_knots <- quantile(imdb[[predictor]], probs = best_percentiles)
+  best_spline_formula <- as.formula(paste("imdb_score ~ bs(", predictor, ", knots = c(", paste(best_knots, collapse = ", "), "))"))
+  
+  # Call the plot function for the best fit
+  plot_spline_fit(imdb, predictor, best_k, best_knots, best_spline_formula)
+  
+}
+```
+### All variables, d = 2, 3, 4, 5
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+spline_results <- list()
+
+plot_spline_fit <- function(data, predictor, best_k, best_knots, best_spline_formula) {
+  # Create the best spline model
+  best_fit_spline <- lm(best_spline_formula, data = imdb)
+  
+  # Plot the spline fit along with the data
+  plot <- ggplot(imdb, aes_string(x = predictor, y = "imdb_score")) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm", formula = best_spline_formula, color = "blue") +
+    geom_smooth(method = "loess", color = "red", linetype = "dashed") +
+    geom_vline(xintercept = best_knots, linetype = "dotted", color = "black") +
+    ggtitle(paste("Best Spline Fit for", predictor, "with", best_k, "knots")) +
+    xlab(predictor) +
+    ylab("IMDB Score") +
+    theme_minimal()
+  
+  # Print the plot
+  print(plot)
+}
+
+# Loop through each predictor
+for (predictor in colnames(numerical_col)) {
+  
+  max_knots <- 5  
+  mse_splines <- rep(NA, max_knots)
+  
+  # Loop through different numbers of knots
+  for (k in 1:max_knots) {
+    knots <- quantile(imdb[[predictor]], probs = seq(0, 1, length.out = k + 2)[-c(1, k + 2)])
+    
+    spline_formula <- as.formula(paste("imdb_score ~ bs(", predictor, ", degree = 5, knots = c(", paste(knots, collapse = ", "), "))"))
+    fit_spline <- glm(spline_formula, data = imdb)
+    mse_splines[k] <- cv.glm(imdb, fit_spline, K = 10)$delta[1]
+  }
+  
+  # Create a data frame to store number of knots and their corresponding MSE
+  mse_results <- data.frame(
+    Knots = 1:max_knots,
+    MSE = mse_splines
+  )
+  
+  mse_results <- mse_results[order(mse_results$MSE), ]
+  spline_results[[predictor]] <- mse_results
+  
+  cat("\nMSE values for spline models with varying knots for:", predictor, "\n")
+  print(mse_results)
+  
+  # Get the best number of knots for plotting
+  best_k <- mse_results$Knots[1]
+  best_percentiles <- seq(0, 1, length.out = best_k + 2)[-c(1, best_k + 2)]
+  best_knots <- quantile(imdb[[predictor]], probs = best_percentiles)
+  best_spline_formula <- as.formula(paste("imdb_score ~ bs(", predictor, ", degree = 5, knots = c(", paste(best_knots, collapse = ", "), "))"))
+  
+  # Call the plot function for the best fit
+  plot_spline_fit(imdb, predictor, best_k, best_knots, best_spline_formula)
+  
+}
+```
+## 11. Making new columns on "starmeter"
+### average
+```{r}
+imdb$weighted_avg_star_meter = rowMeans(imdb[, c("actor1_star_meter", "actor2_star_meter", "actor3_star_meter")], na.rm = TRUE)
+```
+### custom weighted average
+```{r}
+imdb$custom_weighted_avg_star_meter = rowSums(cbind(0.5 * imdb$actor1_star_meter, 
+                                                    0.3 * imdb$actor2_star_meter, 
+                                                    0.2 * imdb$actor3_star_meter), na.rm = TRUE)
+```
+### maximum
+```{r}
+imdb$custom_weighted_avg_star_meter_2 = rowSums(cbind(0.7 * imdb$actor1_star_meter, 
+                                                      0.2 * imdb$actor2_star_meter, 
+                                                      0.1 * imdb$actor3_star_meter), na.rm = TRUE)
+```
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+imdb$max_star_meter = apply(imdb[, c("actor1_star_meter", "actor2_star_meter", "actor3_star_meter")], 1, max, na.rm = TRUE)
+attach(imdb)
+```
+### Regressions with different starmeters
+```{r}
+maareg3=lm(imdb_score~movie_budget+release_month+duration+aspect_ratio+nb_news_articles+weighted_avg_star_meter+nb_faces, data=imdb)
+summary(maareg3)
+```
+```{r}
+maareg4=lm(imdb_score~movie_budget+release_month+duration+aspect_ratio+nb_news_articles+custom_weighted_avg_star_meter+nb_faces, data=imdb)
+summary(maareg4)
+```
+```{r}
+maareg5=lm(imdb_score~movie_budget+release_month+duration+aspect_ratio+nb_news_articles+max_star_meter+nb_faces, data=imdb)
+summary(maareg5)
+```
+```{r}
+maareg6=lm(imdb_score~movie_budget+release_month+duration+aspect_ratio+nb_news_articles+custom_weighted_avg_star_meter_2+nb_faces, data=imdb)
+summary(maareg6)
+```
+
+# Modeling
+## 1. Preprocessing based on the exploratory steps
+```{r}
+imdb = read.csv("IMDB_data_Fall_2024.csv")
+imdb = imdb[-c(191,316,395,492,989,1581,1806),]
+attach(imdb)
+
+########## log transform ##########
+log_col <- c("movie_budget", "duration", "actor1_star_meter", "actor2_star_meter", "actor3_star_meter", "movie_meter_IMDBpro")
+for (col in log_col) {
+  imdb[[paste0("log_", col)]] = log(imdb[[col]] + 1)
+}
+
+########## dummies ##########
+merge_rare_levels <- function(column, threshold) {
+  freq_table <- table(column)
+  column <- ifelse(column %in% names(freq_table[freq_table >= threshold]), 
+                   column, "others")
+  return(as.factor(column))
+}
+
+imdb$release_month <- as.factor(imdb$release_month)
+imdb$country <- merge_rare_levels(imdb$country, 50)
+imdb$maturity_rating <- merge_rare_levels(imdb$maturity_rating, 50)
+imdb$aspect_ratio <- merge_rare_levels(imdb$aspect_ratio, 50)
+attach(imdb)
+
+########## star_meter ##########
+actor_col <- c("log_actor1_star_meter", "log_actor2_star_meter", "log_actor3_star_meter")
+imdb$min_star_meter = apply(imdb[, c("log_actor1_star_meter", "log_actor2_star_meter", "log_actor3_star_meter")], 1, min, na.rm=TRUE)
+
+
+hist(imdb$min_star_meter, 
+    main="Histogram of min_star_meter", 
+     ylab="Count", xlab="min_star_meter")  # new variable not skewed
+
+sreg <- lm(imdb_score ~ min_star_meter, data=imdb)
+summary(sreg)  # significant
+residualPlots(sreg)  # new variable not linear
+attach(imdb)
+
+##### Adding dummies #####
+# Extract the top 80 distributor and create a dummy variable: 1 (in top 80) and 0 (not in top 80)
+distributor_freq <- table(imdb$distributor)
+top_80_distributors <- names(sort(distributor_freq, decreasing = TRUE)[1:80])
+imdb$top_80_distributor <- ifelse(imdb$distributor %in% top_80_distributors, 1, 0)
+
+# Extract the top 100 directors and create a dummy variable: 1 (in top 100) and 0 (not in top 100)
+director_freq <- table(imdb$director)
+top_100_directors <- names(sort(director_freq, decreasing = TRUE)[1:100])
+imdb$top_100_director <- ifelse(imdb$director %in% top_100_directors, 1, 0)
+
+# Create dummy variable with 1 == less than 3 faces on posters and 0 = more than 3 faces on posters
+imdb$nb_faces_three <- ifelse(imdb$nb_faces<=3,1,0)
+
+attach(imdb)
+```
+## 2. Choosing Polynomial Degree
+```{r}
+poly_col <- c("nb_news_articles", "nb_faces", "log_movie_meter_IMDBpro", "min_star_meter")
+
+for (col in poly_col) {
+  formula_1 = as.formula(paste("imdb_score ~ poly(", col, ", 1, raw=TRUE)"))
+  reg_1 = lm(formula_1, data=imdb)
+  formula_2 = as.formula(paste("imdb_score ~ poly(", col, ", 2)"))
+  reg_2 = lm(formula_2, data=imdb)
+  formula_3 = as.formula(paste("imdb_score ~ poly(", col, ", 3)"))
+  reg_3 = lm(formula_3, data=imdb)
+  formula_4 = as.formula(paste("imdb_score ~ poly(", col, ", 4)"))
+  reg_4 = lm(formula_4, data=imdb)
+  formula_5 = as.formula(paste("imdb_score ~ poly(", col, ", 5)"))
+  reg_5 = lm(formula_5, data=imdb)
+  
+  print(anova(reg_1, reg_2, reg_3, reg_4, reg_5))
+}
+for (col in poly_col) {
+  mse=rep(NA,10)
+  for (i in 1:10) {
+    formula = as.formula(paste("imdb_score ~ poly(", col, ",", i, ")"))
+    fit=glm(formula, data=imdb)
+    mse[i]=cv.glm(imdb, fit, K=10)$delta[1]
+  }
+  print(mse)
+}
+```
+degree chosen: (3,4,2,4,3)
+
+## 3. Modeling
+```{r}
+model <- lm(imdb_score ~ 
+               log_movie_budget + log_duration + 
+               release_month + country + maturity_rating + aspect_ratio + 
+               action + adventure + scifi + thriller + musical + romance + western + sport + horror + drama + war + animation + crime + 
+               poly(release_year, 3) + poly(nb_news_articles, 4) + poly(nb_faces, 2) + 
+               poly(log_movie_meter_IMDBpro, 4) + poly(min_star_meter, 3) +
+               top_80_distributor + top_100_director + nb_faces_three,
+             data=imdb
+)
+summary(model)  # R-squared: 0.5124,	Adjusted R-squared: 0.4988, p-value: < 2.2e-16
+stargazer(model, type="html", dep.var.labels=c("IMDB Score"))
+```
+```{r}
+fit_model <- glm(imdb_score ~ 
+                    log_movie_budget + log_duration + 
+                    release_month + country + maturity_rating + aspect_ratio + 
+                    action + adventure + scifi + thriller + musical + romance + western + sport + horror + drama + war + animation + crime + 
+                    poly(release_year, 3) + poly(nb_news_articles, 4) + poly(nb_faces, 2) + 
+                    poly(log_movie_meter_IMDBpro, 4) + poly(min_star_meter, 3) +
+                    top_80_distributor + top_100_director + nb_faces_three,
+                  data=imdb
+)
+mse=cv.glm(imdb, fit_model, K=10)$delta[1]
+mse
+```
+mse (one of our trial): 0.6043417
+
+### Some predictors tried but model not improved:
+#### log_movie_budget*log_duration, 
+#### min_star_meter*log_movie_budget, 
+#### min_star_meter*nb_faces, 
+#### nb_news_articles*log_movie_budget, 
+#### two_genres, 
+#### top_20_percent_cutoff
+
+## 4. Prediction
+```{r}
+########## Processing Test Data ##########
+test_data = read.csv("test_data_IMDB_Fall_2024.csv")
+
+##### log transform  #####
+for (col in log_col) {
+  test_data[[paste0("log_", col)]] = log(test_data[[col]] + 1)
+}
+
+##### dummies #####
+test_data$country <- merge_rare_levels(test_data$country, 50)
+test_data$maturity_rating <- merge_rare_levels(test_data$maturity_rating, 50)
+test_data$aspect_ratio <- merge_rare_levels(test_data$aspect_ratio, 50)
+
+##### star_meter #####
+test_data$min_star_meter = apply(test_data[, c("log_actor1_star_meter", "log_actor2_star_meter", "log_actor3_star_meter")], 1, min, na.rm=TRUE)
+
+##### Adding dummies #####
+# Extract the top 80 distributor and create a dummy variable: 1 (in top 80) and 0 (not in top 80)
+distributor_freq <- table(test_data$distributor)
+top_80_distributors <- names(sort(distributor_freq, decreasing = TRUE)[1:80])
+test_data$top_80_distributor <- ifelse(test_data$distributor %in% top_80_distributors, 1, 0)
+
+# Extract the top 100 directors and create a dummy variable: 1 (in top 100) and 0 (not in top 100)
+director_freq <- table(test_data$director)
+top_100_directors <- names(sort(director_freq, decreasing = TRUE)[1:100])
+test_data$top_100_director <- ifelse(test_data$director %in% top_100_directors, 1, 0)
+
+# Create dummy variable with 1 == less than 3 faces on posters and 0 = more than 3 faces on posters
+test_data$nb_faces_three <- ifelse(test_data$nb_faces<=3,1,0)
+
+
+########## Prediction ##########
+prediction <- predict(model, test_data)
+prediction
+```
